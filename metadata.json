@@ -1,0 +1,6 @@
+{
+  "name": "PowerRectify - Power Electronics Rectifier Simulator",
+  "description": "Interactive power electronics lab simulator for 1-phase and 3-phase diode and thyristor rectifiers (half-wave & full-wave) with R and RL loads, live schematics, and waveforms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
