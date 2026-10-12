@@ -120,8 +120,11 @@ export function simulateRectifier(config: RectifierConfig): SimulationResult {
       const displayTime = t - warmupCycles * T;
       const displayThetaDeg = (omega * displayTime * 180) / Math.PI;
 
-      // Calculate AC source current based on conduction
-      let iSource = 0;
+      // Calculate AC source currents based on conduction
+      let iSource = 0; // Phase A
+      let iSourceB = 0; // Phase B
+      let iSourceC = 0; // Phase C
+
       if (phase === '1-phase') {
         if (wave === 'half-wave') {
           iSource = activeSwitches.includes(device === 'diode' ? 'D1' : 'T1') ? current_io : 0;
@@ -134,11 +137,33 @@ export function simulateRectifier(config: RectifierConfig): SimulationResult {
           }
         }
       } else {
-        // 3-phase source current for Phase A
-        if (activeSwitches.includes('D1') || activeSwitches.includes('T1')) {
-          iSource = current_io;
-        } else if (activeSwitches.includes('D4') || activeSwitches.includes('T4')) {
-          iSource = -current_io;
+        // 3-phase source currents:
+        if (wave === 'half-wave') {
+          iSource = activeSwitches.includes('D1') || activeSwitches.includes('T1') ? current_io : 0;
+          iSourceB = activeSwitches.includes('D2') || activeSwitches.includes('T2') ? current_io : 0;
+          iSourceC = activeSwitches.includes('D3') || activeSwitches.includes('T3') ? current_io : 0;
+        } else {
+          // 3-phase full-wave bridge:
+          // Phase A: Top D1/T1 (+Io), Bottom D4/T4 (-Io)
+          if (activeSwitches.includes('D1') || activeSwitches.includes('T1')) {
+            iSource = current_io;
+          } else if (activeSwitches.includes('D4') || activeSwitches.includes('T4')) {
+            iSource = -current_io;
+          }
+
+          // Phase B: Top D3/T3 (+Io), Bottom D6/T6 (-Io)
+          if (activeSwitches.includes('D3') || activeSwitches.includes('T3')) {
+            iSourceB = current_io;
+          } else if (activeSwitches.includes('D6') || activeSwitches.includes('T6')) {
+            iSourceB = -current_io;
+          }
+
+          // Phase C: Top D5/T5 (+Io), Bottom D2/T2 (-Io)
+          if (activeSwitches.includes('D5') || activeSwitches.includes('T5')) {
+            iSourceC = current_io;
+          } else if (activeSwitches.includes('D2') || activeSwitches.includes('T2')) {
+            iSourceC = -current_io;
+          }
         }
       }
 
@@ -155,6 +180,8 @@ export function simulateRectifier(config: RectifierConfig): SimulationResult {
         vOutput: vApplied,
         iOutput: current_io,
         iSource,
+        iSourceB: phase === '3-phase' ? iSourceB : undefined,
+        iSourceC: phase === '3-phase' ? iSourceC : undefined,
         conductingDevices: conductingSwitches,
         gatePulseActive: gatePulse,
         vSwitch1,
@@ -421,10 +448,18 @@ function solveInstantaneousRectifierState(args: InstantStateArgs): {
     // Positive rail: T1 (Ph A), T3 (Ph B), T5 (Ph C)
     // Negative rail: T4 (Ph A), T6 (Ph B), T2 (Ph C)
     const alphaOffset = isControlled ? (alphaRad * 180) / Math.PI : 0;
-    const baseAngle = (thetaDeg - 60 - alphaOffset + 720) % 360;
+    // Natural crossover of line voltages occurs at 30° (when va = vc, and vb is negative peak).
+    // Conduction intervals of 60° each:
+    // Sector 0 (30° to 90°):   V_ab with T1 & T6
+    // Sector 1 (90° to 150°):  V_ac with T1 & T2
+    // Sector 2 (150° to 210°): V_bc with T3 & T2
+    // Sector 3 (210° to 270°): V_ba with T3 & T4
+    // Sector 4 (270° to 330°): V_ca with T5 & T4
+    // Sector 5 (330° to 30°):  V_cb with T5 & T6
+    const baseAngle = (thetaDeg - 30 - alphaOffset + 720) % 360;
     const sector = Math.floor(baseAngle / 60);
 
-    gatePulse = isControlled && isPulseActive((60 + alphaOffset + sector * 60) % 360);
+    gatePulse = isControlled && isPulseActive((30 + alphaOffset + sector * 60) % 360);
 
     switch (sector) {
       case 0: // V_ab: T1 (A) & T6 (B)
@@ -442,34 +477,43 @@ function solveInstantaneousRectifierState(args: InstantStateArgs): {
       case 2: // V_bc: T3 (B) & T2 (C)
         vApplied = vLineBC;
         activeSwitches.push(`${prefix}3`, `${prefix}2`);
-        vSwitch1 = vSourceA - vSourceB;
+        vSwitch1 = vLineAB;
         break;
       case 3: // V_ba: T3 (B) & T4 (A)
         vApplied = -vLineAB;
         activeSwitches.push(`${prefix}3`, `${prefix}4`);
-        vSwitch1 = 0; // Ph A is connected to neg rail via T4, so vSwitch1 across T1 = -vApplied
+        vSwitch1 = vLineAB;
         break;
       case 4: // V_ca: T5 (C) & T4 (A)
         vApplied = vLineCA;
         activeSwitches.push(`${prefix}5`, `${prefix}4`);
-        vSwitch1 = vSourceA - vSourceC;
+        vSwitch1 = -vLineCA;
         break;
       case 5: // V_cb: T5 (C) & T6 (B)
       default:
         vApplied = -vLineBC;
         activeSwitches.push(`${prefix}5`, `${prefix}6`);
-        vSwitch1 = vSourceA - vSourceC;
+        vSwitch1 = -vLineCA;
         break;
     }
 
-    if (useFWD && vApplied < 0 && current_io > 0.001) {
-      vApplied = 0;
-      activeSwitches.length = 0;
-      activeSwitches.push('FWD');
-      iFWD = current_io;
-    } else if (!hasRL && vApplied < 0) {
-      vApplied = 0;
-      activeSwitches.length = 0;
+    if (vApplied < 0) {
+      if (useFWD && current_io > 0.001) {
+        vApplied = 0;
+        activeSwitches.length = 0;
+        activeSwitches.push('FWD');
+        iFWD = current_io;
+      } else if (!hasRL || current_io <= 0.001) {
+        vApplied = 0;
+        activeSwitches.length = 0;
+      }
+    }
+
+    if (activeSwitches.length === 0) {
+      iSwitch1 = 0;
+      if (sector === 0 || sector === 1) {
+        vSwitch1 = sector === 0 ? vLineAB : -vLineCA;
+      }
     }
 
     return { vApplied, activeSwitches, gatePulse, vSwitch1, iSwitch1, iFWD };

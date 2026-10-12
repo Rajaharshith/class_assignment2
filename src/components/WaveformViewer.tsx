@@ -34,15 +34,21 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [activeTab, setActiveTab] = useState<'oscilloscope' | 'harmonics'>('oscilloscope');
 
-  // Channel Visibility
+  // Channel Visibility - iSource enabled by default as requested
   const [visibleChannels, setVisibleChannels] = useState({
     vSource: true,
     vOutput: true,
     iOutput: true,
-    iSource: false,
+    iSource: true,
     gatePulse: config.device === 'thyristor',
     vSwitch: false,
   });
+
+  // For 3-Phase: toggle between showing just one source current (Phase A, default) vs all 3 phases
+  const [showAllPhasesCurrent, setShowAllPhasesCurrent] = useState(false);
+
+  // For 3-Phase Full-Wave: toggle between showing Line-to-Line voltages (VLL envelope) vs Phase voltages (Vph)
+  const [showLineVoltages, setShowLineVoltages] = useState(true);
 
   // Enable gatePulse automatically if thyristor selected
   useEffect(() => {
@@ -103,23 +109,58 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
     ctx.fillRect(0, 0, width, height);
 
     // ==========================================
-    // SPLIT CANVAS INTO TWO DEDICATED GRAPHS:
-    // Window 1 (Top): Voltage (V) - 54% of height
-    // Window 2 (Bottom): Current (A) - 46% of height
+    // DYNAMIC MULTI-PANE CANVAS LAYOUT:
+    // Window 1: CH1 Voltage (V) [Vs & Vo]
+    // Window 2: CH2 Load Current (A) [Io]
+    // Window 3: CH3 Source Current (A) [Is] (SEPARATE from Iload)
     // ==========================================
-    const splitY = Math.floor(height * 0.54);
-    const vWindow = { yTop: 20, yBottom: splitY - 8, height: splitY - 28 };
-    const iWindow = { yTop: splitY + 20, yBottom: height - 16, height: height - splitY - 36 };
+    const hasIo = visibleChannels.iOutput;
+    const hasIs = visibleChannels.iSource;
 
-    // Divider bar between Voltage & Current graphs
+    let vWindow: { yTop: number; yBottom: number; height: number };
+    let ioWindow: { yTop: number; yBottom: number; height: number } | null = null;
+    let isWindow: { yTop: number; yBottom: number; height: number } | null = null;
+    const dividerYs: number[] = [];
+
+    if (hasIo && hasIs) {
+      // 3 Dedicated Separate Graphs
+      const split1 = Math.floor(height * 0.38);
+      const split2 = Math.floor(height * 0.69);
+      dividerYs.push(split1, split2);
+
+      vWindow = { yTop: 18, yBottom: split1 - 8, height: split1 - 26 };
+      ioWindow = { yTop: split1 + 20, yBottom: split2 - 8, height: split2 - split1 - 28 };
+      isWindow = { yTop: split2 + 20, yBottom: height - 16, height: height - split2 - 36 };
+    } else if (hasIo && !hasIs) {
+      // 2 Graphs: Voltage + Load Current
+      const split1 = Math.floor(height * 0.52);
+      dividerYs.push(split1);
+
+      vWindow = { yTop: 18, yBottom: split1 - 8, height: split1 - 26 };
+      ioWindow = { yTop: split1 + 20, yBottom: height - 16, height: height - split1 - 36 };
+    } else if (!hasIo && hasIs) {
+      // 2 Graphs: Voltage + Source Current
+      const split1 = Math.floor(height * 0.52);
+      dividerYs.push(split1);
+
+      vWindow = { yTop: 18, yBottom: split1 - 8, height: split1 - 26 };
+      isWindow = { yTop: split1 + 20, yBottom: height - 16, height: height - split1 - 36 };
+    } else {
+      // 1 Graph: Voltage Only
+      vWindow = { yTop: 18, yBottom: height - 16, height: height - 34 };
+    }
+
+    // Divider bars between graphs
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(0, splitY);
-    ctx.lineTo(width, splitY);
-    ctx.stroke();
+    for (const dY of dividerYs) {
+      ctx.beginPath();
+      ctx.moveTo(0, dY);
+      ctx.lineTo(width, dY);
+      ctx.stroke();
+    }
 
-    // Horizontal degree grid markings across both windows
+    // Horizontal degree grid markings across all windows
     const numVDivs = 10;
     ctx.strokeStyle = '#172554';
     ctx.lineWidth = 1;
@@ -131,26 +172,39 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       ctx.lineTo(x, height);
       ctx.stroke();
 
-      // Degree markings at the bottom of each window
+      // Degree markings at the bottom of each divider and at the bottom of canvas
       const deg = ((totalThetaMax / numVDivs) * i).toFixed(0);
       ctx.fillStyle = '#64748b';
       ctx.font = '9px monospace';
-      ctx.fillText(`${deg}°`, x + 3, splitY - 3);
+      for (const dY of dividerYs) {
+        ctx.fillText(`${deg}°`, x + 3, dY - 3);
+      }
       ctx.fillText(`${deg}°`, x + 3, height - 3);
     }
 
     // Dynamic Maximums
     let maxV = 100;
-    let maxI = 5;
     for (const s of samples) {
       if (Math.abs(s.vSourceA) > maxV) maxV = Math.abs(s.vSourceA);
       if (Math.abs(s.vOutput) > maxV) maxV = Math.abs(s.vOutput);
       if (Math.abs(s.vSwitch1) > maxV) maxV = Math.abs(s.vSwitch1);
-      if (s.iOutput > maxI) maxI = s.iOutput;
-      if (Math.abs(s.iSource) > maxI) maxI = Math.abs(s.iSource);
     }
     maxV = maxV * 1.25;
-    maxI = maxI * 1.35;
+
+    let maxIo = 5;
+    for (const s of samples) {
+      if (s.iOutput > maxIo) maxIo = s.iOutput;
+    }
+    maxIo = maxIo * 1.35;
+
+    let maxIs = 5;
+    let minIs = 0;
+    for (const s of samples) {
+      if (Math.abs(s.iSource) > maxIs) maxIs = Math.abs(s.iSource);
+      if (s.iSource < minIs) minIs = s.iSource;
+    }
+    maxIs = maxIs * 1.35;
+    const isBipolar = minIs < -0.05;
 
     const toX = (thetaDeg: number) => (thetaDeg / totalThetaMax) * width;
 
@@ -163,10 +217,22 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
 
     // Window 1 Title Badge
     ctx.fillStyle = '#1e293b';
-    ctx.fillRect(8, 4, 260, 15);
+    const is3PFull = config.phase === '3-phase' && config.wave === 'full-wave';
+    const badgeW = is3PFull ? 370 : 260;
+    ctx.fillRect(8, 4, badgeW, 15);
     ctx.fillStyle = '#94a3b8';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('CH1: VOLTAGE [Vs (Dotted) vs Vo (Thick)]', 12, 15);
+    if (is3PFull) {
+      ctx.fillText(
+        showLineVoltages
+          ? 'CH1: VOLTAGE [VLL Line Envelopes (Dotted) vs Vo (Thick 6-Pulse)]'
+          : 'CH1: VOLTAGE [Vph Phase Voltages (Dotted) vs Vo (Thick 6-Pulse)]',
+        12,
+        15
+      );
+    } else {
+      ctx.fillText('CH1: VOLTAGE [Vs (Dotted) vs Vo (Thick)]', 12, 15);
+    }
 
     // Voltage Zero-line Axis
     ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
@@ -202,51 +268,140 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
 
     // 2. Trace: AC Source Voltage (DOTTED LINE)
     if (visibleChannels.vSource) {
-      // Phase A (Dotted Yellow)
-      ctx.strokeStyle = '#eab308';
-      ctx.lineWidth = 2.0;
-      ctx.setLineDash([4, 4]); // DOTTED LINE AS REQUESTED
-      ctx.beginPath();
-      for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        const x = toX(s.thetaDeg);
-        const y = toY_V(s.vSourceA);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
+      ctx.setLineDash([4, 4]); // DOTTED LINE
 
-      // If 3-phase, Phase B & C also dotted
-      if (config.phase === '3-phase') {
-        // Phase B (Dotted Blue)
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.65)';
-        ctx.lineWidth = 1.6;
+      if (is3PFull && showLineVoltages) {
+        // In 3-Phase Full Bridge, the output voltage Vo is formed by the 6 Line-to-Line voltages
+        // Draw the 3 positive line voltages + 3 negative line voltages as reference envelopes
+        // V_ab (Dotted Yellow/Amber)
+        ctx.strokeStyle = '#eab308';
+        ctx.lineWidth = 1.8;
         ctx.beginPath();
         for (let i = 0; i < samples.length; i++) {
           const s = samples[i];
-          if (s.vSourceB !== undefined) {
+          if (s.vLineAB !== undefined) {
             const x = toX(s.thetaDeg);
-            const y = toY_V(s.vSourceB);
+            const y = toY_V(s.vLineAB);
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
           }
         }
         ctx.stroke();
 
-        // Phase C (Dotted Red)
-        ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
-        ctx.lineWidth = 1.6;
+        // V_bc (Dotted Sky Blue)
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.8;
         ctx.beginPath();
         for (let i = 0; i < samples.length; i++) {
           const s = samples[i];
-          if (s.vSourceC !== undefined) {
+          if (s.vLineBC !== undefined) {
             const x = toX(s.thetaDeg);
-            const y = toY_V(s.vSourceC);
+            const y = toY_V(s.vLineBC);
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
           }
         }
         ctx.stroke();
+
+        // V_ca (Dotted Rose)
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          if (s.vLineCA !== undefined) {
+            const x = toX(s.thetaDeg);
+            const y = toY_V(s.vLineCA);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        // Opposite polarity line envelopes: -Vab, -Vbc, -Vca (faint dotted lines so all 6 lobes are visible)
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          if (s.vLineAB !== undefined) {
+            const x = toX(s.thetaDeg);
+            const y = toY_V(-s.vLineAB);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          if (s.vLineBC !== undefined) {
+            const x = toX(s.thetaDeg);
+            const y = toY_V(-s.vLineBC);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          if (s.vLineCA !== undefined) {
+            const x = toX(s.thetaDeg);
+            const y = toY_V(-s.vLineCA);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+      } else {
+        // Phase A (Dotted Yellow)
+        ctx.strokeStyle = '#eab308';
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          const x = toX(s.thetaDeg);
+          const y = toY_V(s.vSourceA);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // If 3-phase, Phase B & C also dotted
+        if (config.phase === '3-phase') {
+          // Phase B (Dotted Blue)
+          ctx.strokeStyle = 'rgba(59, 130, 246, 0.65)';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          for (let i = 0; i < samples.length; i++) {
+            const s = samples[i];
+            if (s.vSourceB !== undefined) {
+              const x = toX(s.thetaDeg);
+              const y = toY_V(s.vSourceB);
+              if (i === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+          }
+          ctx.stroke();
+
+          // Phase C (Dotted Red)
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          for (let i = 0; i < samples.length; i++) {
+            const s = samples[i];
+            if (s.vSourceC !== undefined) {
+              const x = toX(s.thetaDeg);
+              const y = toY_V(s.vSourceC);
+              if (i === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+          }
+          ctx.stroke();
+        }
       }
       ctx.setLineDash([]); // Reset dash
     }
@@ -304,62 +459,50 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
     }
 
     // ========================================================
-    // WINDOW 2: SEPARATE CURRENT GRAPH (A)
+    // WINDOW 2: SEPARATE LOAD CURRENT GRAPH (A) [Io]
     // ========================================================
-    const iZeroY = iWindow.yBottom - 8;
-    const iScale = (iWindow.height * 0.75) / maxI;
-    const toY_I = (val: number) => iZeroY - val * iScale;
+    let toY_Io = (_val: number) => 0;
+    if (ioWindow && hasIo) {
+      const ioZeroY = ioWindow.yBottom - 8;
+      const ioScale = (ioWindow.height * 0.78) / maxIo;
+      toY_Io = (val: number) => ioZeroY - val * ioScale;
 
-    // Window 2 Title Badge
-    ctx.fillStyle = '#1e293b';
-    ctx.fillRect(8, splitY + 4, 240, 15);
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = 'bold 10px monospace';
-    ctx.fillText('CH2: CURRENT [Io (Load Current)]', 12, splitY + 15);
+      // Window 2 Title Badge
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(8, ioWindow.yTop - 16, 235, 15);
+      ctx.strokeStyle = '#0284c7';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(8, ioWindow.yTop - 16, 235, 15);
 
-    // Current Zero-line Axis
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(0, iZeroY);
-    ctx.lineTo(width, iZeroY);
-    ctx.stroke();
-    ctx.setLineDash([]);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 9.5px monospace';
+      ctx.fillText('CH2: LOAD CURRENT [Io (DC Load)]', 12, ioWindow.yTop - 5);
 
-    ctx.fillStyle = '#64748b';
-    ctx.font = '9px monospace';
-    ctx.fillText('0A', 4, iZeroY - 3);
-    ctx.fillText(`+${maxI.toFixed(1)}A`, 4, iWindow.yTop + 10);
-
-    // 1. Trace: Input AC Current (if enabled)
-    if (visibleChannels.iSource) {
-      ctx.strokeStyle = '#f97316';
-      ctx.lineWidth = 1.8;
+      // Current Zero-line Axis
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
-      for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        const x = toX(s.thetaDeg);
-        const y = toY_I(s.iSource);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
+      ctx.moveTo(0, ioZeroY);
+      ctx.lineTo(width, ioZeroY);
       ctx.stroke();
       ctx.setLineDash([]);
-    }
 
-    // 2. Trace: Output Load Current Io (THICK SOLID SKY-BLUE LINE)
-    if (visibleChannels.iOutput) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '9px monospace';
+      ctx.fillText('0A', 4, ioZeroY - 3);
+      ctx.fillText(`+${maxIo.toFixed(1)}A`, 4, ioWindow.yTop + 8);
+
+      // Trace: Output Load Current Io (THICK SOLID SKY-BLUE LINE)
       ctx.strokeStyle = '#38bdf8';
       ctx.shadowColor = 'rgba(56, 189, 248, 0.5)';
       ctx.shadowBlur = 6;
-      ctx.lineWidth = 3.2; // THICK SOLID LINE
-      ctx.setLineDash([]); // SOLID
+      ctx.lineWidth = 3.0;
+      ctx.setLineDash([]);
       ctx.beginPath();
       for (let i = 0; i < samples.length; i++) {
         const s = samples[i];
         const x = toX(s.thetaDeg);
-        const y = toY_I(s.iOutput);
+        const y = toY_Io(s.iOutput);
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -367,9 +510,9 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       ctx.shadowBlur = 0;
 
       // Average DC Current Line
-      const yIdc = toY_I(metrics.iDc);
+      const yIdc = toY_Io(metrics.iDc);
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.4;
       ctx.setLineDash([5, 5]);
       ctx.beginPath();
       ctx.moveTo(0, yIdc);
@@ -378,11 +521,126 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       ctx.setLineDash([]);
 
       ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 10px monospace';
+      ctx.font = 'bold 9.5px monospace';
       ctx.fillText(`Idc = ${metrics.iDc.toFixed(2)}A`, width - 110, yIdc - 4);
     }
 
-    // Measurement Cursors (spanning both windows)
+    // ========================================================
+    // WINDOW 3: SEPARATE SOURCE CURRENT GRAPH (A) [Is]
+    // ========================================================
+    let toY_Is = (_val: number) => 0;
+    if (isWindow && hasIs) {
+      const isZeroY = isBipolar
+        ? isWindow.yTop + isWindow.height * 0.52
+        : isWindow.yBottom - 8;
+      const isScale = isBipolar
+        ? (isWindow.height * 0.44) / maxIs
+        : (isWindow.height * 0.78) / maxIs;
+      toY_Is = (val: number) => isZeroY - val * isScale;
+
+      // Window 3 Title Badge
+      const is3Phase = config.phase === '3-phase';
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(8, isWindow.yTop - 16, is3Phase ? 315 : 260, 15);
+      ctx.strokeStyle = '#ea580c';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(8, isWindow.yTop - 16, is3Phase ? 315 : 260, 15);
+
+      ctx.fillStyle = '#fb923c';
+      ctx.font = 'bold 9.5px monospace';
+      if (is3Phase) {
+        ctx.fillText(
+          showAllPhasesCurrent
+            ? 'CH3: 3-PHASE CURRENTS [Isa (Org), Isb (Yel), Isc (Sky)]'
+            : 'CH3: SOURCE CURRENT [Isa (Phase A Only - Single Source)]',
+          12,
+          isWindow.yTop - 5
+        );
+      } else {
+        ctx.fillText('CH3: SOURCE CURRENT [Is (AC Source)]', 12, isWindow.yTop - 5);
+      }
+
+      // Is Zero-line Axis
+      ctx.strokeStyle = 'rgba(251, 146, 60, 0.4)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, isZeroY);
+      ctx.lineTo(width, isZeroY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '9px monospace';
+      ctx.fillText('0A', 4, isZeroY - 3);
+      ctx.fillText(`+${maxIs.toFixed(1)}A`, 4, isWindow.yTop + 8);
+      if (isBipolar) {
+        ctx.fillText(`-${maxIs.toFixed(1)}A`, 4, isWindow.yBottom - 3);
+      }
+
+      // Trace 1: Phase A AC Source Current Is / Isa (VIBRANT ORANGE LINE)
+      ctx.strokeStyle = '#f97316';
+      ctx.shadowColor = 'rgba(249, 115, 22, 0.5)';
+      ctx.shadowBlur = 5;
+      ctx.lineWidth = 2.6;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      for (let i = 0; i < samples.length; i++) {
+        const s = samples[i];
+        const x = toX(s.thetaDeg);
+        const y = toY_Is(s.iSource);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Trace 2 & 3: Phase B and C (only if 3-Phase AND showAllPhasesCurrent enabled)
+      if (is3Phase && showAllPhasesCurrent) {
+        // Phase B (Yellow dashed)
+        ctx.strokeStyle = '#eab308';
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([4, 2]);
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          const x = toX(s.thetaDeg);
+          const y = toY_Is(s.iSourceB ?? 0);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Phase C (Sky Blue dotted)
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const s = samples[i];
+          const x = toX(s.thetaDeg);
+          const y = toY_Is(s.iSourceC ?? 0);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // RMS Source Current annotation
+      let sumSqIs = 0;
+      for (const s of samples) sumSqIs += s.iSource * s.iSource;
+      const isRmsVal = Math.sqrt(sumSqIs / (samples.length || 1));
+
+      ctx.fillStyle = '#fb923c';
+      ctx.font = 'bold 9.5px monospace';
+      ctx.fillText(
+        is3Phase ? `Isa(rms) = ${isRmsVal.toFixed(2)}A` : `Is(rms) = ${isRmsVal.toFixed(2)}A`,
+        width - 125,
+        isZeroY - 4
+      );
+    }
+
+    // Measurement Cursors (spanning all windows)
     if (showCursors) {
       if (cursor1X !== null) {
         ctx.strokeStyle = '#f43f5e';
@@ -409,7 +667,7 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       ctx.setLineDash([]);
     }
 
-    // Playhead / Instantaneous Scrubber (spanning both windows)
+    // Playhead / Instantaneous Scrubber (spanning all windows)
     const activeSample = samples[activeSampleIndex];
     if (activeSample) {
       const playheadX = toX(activeSample.thetaDeg);
@@ -440,9 +698,9 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
         ctx.stroke();
       }
 
-      // Current window dot (Io)
-      if (visibleChannels.iOutput) {
-        const dotY = toY_I(activeSample.iOutput);
+      // Load Current window dot (Io)
+      if (hasIo && ioWindow) {
+        const dotY = toY_Io(activeSample.iOutput);
         ctx.fillStyle = '#38bdf8';
         ctx.beginPath();
         ctx.arc(playheadX, dotY, 4.5, 0, 2 * Math.PI);
@@ -451,10 +709,47 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
+
+      // Source Current window dot (Is)
+      if (hasIs && isWindow) {
+        const dotY = toY_Is(activeSample.iSource);
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.arc(playheadX, dotY, 4.5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Additional playhead markers if viewing all 3 phases
+        if (config.phase === '3-phase' && showAllPhasesCurrent) {
+          if (activeSample.iSourceB !== undefined) {
+            const dotYB = toY_Is(activeSample.iSourceB);
+            ctx.fillStyle = '#eab308';
+            ctx.beginPath();
+            ctx.arc(playheadX, dotYB, 4.0, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+          }
+          if (activeSample.iSourceC !== undefined) {
+            const dotYC = toY_Is(activeSample.iSourceC);
+            ctx.fillStyle = '#38bdf8';
+            ctx.beginPath();
+            ctx.arc(playheadX, dotYC, 4.0, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+          }
+        }
+      }
     }
   }, [
     samples,
     visibleChannels,
+    showAllPhasesCurrent,
     activeTab,
     config,
     metrics,
@@ -543,9 +838,6 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       {/* Top Header / Channel Toggles & Controls */}
       <div className="flex flex-wrap items-center justify-between pb-2 mb-2 border-b border-slate-800/80 gap-2">
         <div className="flex items-center gap-2">
-          <span className="text-sky-400 font-extrabold text-xs font-mono bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/30">
-            RIGHT
-          </span>
           <span className="text-xs font-bold font-mono text-slate-200 hidden sm:inline-block">
             Simulation Oscilloscope
           </span>
@@ -587,8 +879,23 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
                   : 'bg-slate-900 border-slate-800 text-slate-500 line-through'
               }`}
             >
-              CH1: Vin (Dotted)
+              {config.phase === '3-phase' && config.wave === 'full-wave' && showLineVoltages
+                ? 'CH1: VLL (Dotted)'
+                : 'CH1: Vin (Dotted)'}
             </button>
+            {config.phase === '3-phase' && config.wave === 'full-wave' && visibleChannels.vSource && (
+              <button
+                onClick={() => setShowLineVoltages(!showLineVoltages)}
+                className={`px-2 py-0.5 rounded border transition-all text-[10px] font-mono ${
+                  showLineVoltages
+                    ? 'bg-yellow-500/20 border-yellow-500/60 text-yellow-300 font-bold'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+                title="Toggle between Line-to-Line voltages (VLL envelopes) and Phase voltages (Vph)"
+              >
+                {showLineVoltages ? 'VLL (Line)' : 'Vph (Phase)'}
+              </button>
+            )}
             <button
               onClick={() => setVisibleChannels((p) => ({ ...p, vOutput: !p.vOutput }))}
               className={`px-2 py-0.5 rounded border transition-all text-[11px] font-bold ${
@@ -607,8 +914,33 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
                   : 'bg-slate-900 border-slate-800 text-slate-500 line-through'
               }`}
             >
-              CH2: Io (Current)
+              CH2: Io (Load)
             </button>
+            <button
+              onClick={() => setVisibleChannels((p) => ({ ...p, iSource: !p.iSource }))}
+              className={`px-2 py-0.5 rounded border transition-all text-[11px] font-bold ${
+                visibleChannels.iSource
+                  ? 'bg-orange-500/20 border-orange-500 text-orange-400'
+                  : 'bg-slate-900 border-slate-800 text-slate-500 line-through'
+              }`}
+            >
+              {config.phase === '3-phase' ? 'CH3: Isa (Phase A)' : 'CH3: Is (Source)'}
+            </button>
+
+            {/* 3-Phase: Mode Switcher between Single Source Current (Phase A) and All 3 Phases */}
+            {config.phase === '3-phase' && visibleChannels.iSource && (
+              <button
+                onClick={() => setShowAllPhasesCurrent(!showAllPhasesCurrent)}
+                className={`px-2 py-0.5 rounded border transition-all text-[10px] font-mono ${
+                  showAllPhasesCurrent
+                    ? 'bg-amber-500/20 border-amber-500/60 text-amber-300 font-bold'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+                title="Click to toggle between showing just Phase A or all 3 phase currents"
+              >
+                {showAllPhasesCurrent ? 'All 3 Currents (Ia, Ib, Ic)' : 'Just One (Phase A)'}
+              </button>
+            )}
 
             {/* Measurement Cursors Toggle */}
             <button
@@ -638,7 +970,7 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
       </div>
 
       {/* Main Display Area */}
-      <div className="relative flex-1 w-full min-h-[300px] sm:min-h-[350px] rounded-lg overflow-hidden border border-slate-800/80 bg-slate-950 flex flex-col">
+      <div className="relative flex-1 w-full min-h-[380px] sm:min-h-[440px] rounded-lg overflow-hidden border border-slate-800/80 bg-slate-950 flex flex-col">
         {activeTab === 'oscilloscope' ? (
           <>
             <canvas
@@ -667,9 +999,35 @@ export const WaveformViewer: React.FC<WaveformViewerProps> = ({
                 <div className="text-sky-400">
                   Io: <span className="font-bold">{hoverSample.iOutput.toFixed(3)} A</span>
                 </div>
-                <div className="text-yellow-400">
-                  Vs: <span className="font-bold">{hoverSample.vSourceA.toFixed(2)} V</span>
+                <div className="text-orange-400">
+                  {config.phase === '3-phase' ? 'Isa: ' : 'Is: '}
+                  <span className="font-bold">{hoverSample.iSource.toFixed(3)} A</span>
+                  {showAllPhasesCurrent && hoverSample.iSourceB !== undefined && (
+                    <span className="text-[9px] text-amber-300 ml-1">
+                      (b:{hoverSample.iSourceB.toFixed(2)}A, c:{hoverSample.iSourceC?.toFixed(2)}A)
+                    </span>
+                  )}
                 </div>
+                {config.phase === '3-phase' && config.wave === 'full-wave' && showLineVoltages && hoverSample.vLineAB !== undefined ? (
+                  <div className="text-yellow-400">
+                    Vab: <span className="font-bold">{hoverSample.vLineAB.toFixed(1)}V</span> | Vbc:{' '}
+                    <span className="font-bold">{hoverSample.vLineBC?.toFixed(1)}V</span>
+                  </div>
+                ) : (
+                  <div className="text-yellow-400">
+                    Vs: <span className="font-bold">{hoverSample.vSourceA.toFixed(2)} V</span>
+                    {config.phase === '3-phase' && hoverSample.vSourceB !== undefined && (
+                      <span className="text-[9px] text-slate-400 ml-1">
+                        (Vb:{hoverSample.vSourceB.toFixed(1)}V, Vc:{hoverSample.vSourceC?.toFixed(1)}V)
+                      </span>
+                    )}
+                  </div>
+                )}
+                {hoverSample.conductingDevices && hoverSample.conductingDevices.length > 0 && (
+                  <div className="text-purple-300 pt-0.5 border-t border-slate-800 text-[9px]">
+                    ON: <span className="font-bold text-white">{hoverSample.conductingDevices.join(', ')}</span>
+                  </div>
+                )}
               </div>
             )}
 

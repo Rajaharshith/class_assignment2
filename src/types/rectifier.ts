@@ -32,7 +32,9 @@ export interface SimulationSample {
 
   vOutput: number; // Load voltage v_o(t)
   iOutput: number; // Load current i_o(t)
-  iSource: number; // AC input current i_s(t)
+  iSource: number; // AC input current i_s(t) (Phase A)
+  iSourceB?: number; // Phase B AC input current
+  iSourceC?: number; // Phase C AC input current
 
   // Switch states
   conductingDevices: string[]; // e.g., ['D1', 'D2'] or ['T1', 'T2'] or ['FWD']
